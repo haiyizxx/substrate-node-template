@@ -142,19 +142,21 @@ impl <T:Trait> Module<T> {
 mod tests {
     use super::*;
     use sp_core::H256;
-    use frame_support::{impl_outer_origin, parameter_types, weights: Weight,
+    use frame_support::{impl_outer_origin, parameter_types, weights::Weight,
         traits::{OnFinalize, OnInitialize}
     };
     use sp_runtime::{
-        traits::{BlakeTwo256, IdentityLookup}, testing:Header, Perbill
+        traits::{BlakeTwo256, IdentityLookup}, testing::Header, Perbill
     };
     use frame_system as system;
 
+    // Mock check signature
     impl_outer_origin! {
         pub enum Origin for Test {}
     }
 
     #[derive(Clone, Eq, PartialEq, Debug)]
+
     pub struct Test;
     parameter_types! {
         pub const BlockHashCount: u64 = 250;
@@ -163,6 +165,7 @@ mod tests {
         pub const AvailableBlockRatio: Perbill = Perbill::from_percent(75);
 
     }
+
     impl system::Trait for Test {
         type BaseCallFilter = ();
         type Origin = Origin;
@@ -192,12 +195,36 @@ mod tests {
     }
     
     type Randomness = pallet_randomness_collective_flip::Module<Test>;
-    
+
     impl Trait for Test {
         type Event = ();
-        type Randomness = ClaimLengthLimit;
+        type Randomness = Randomness;
     }
 
-    pub type KittiesModule = Module<Test>;
+    pub type Kitties = Module<Test>;
+    pub type System = frame_system::Module<Test>;
+
+    fn run_to_block(n: u64) {
+        while System::block_number() < n {
+            Kitties::on_finalize(System::block_number());
+            System::on_finalize(System::block_number());
+            System::set_block_number(System::block_number()+1);
+            System::on_initialize(System::block_number());
+            Kitties::on_initialize(System::block_number());
+        }
+    }
+
+    // Build genesis storage according to the mock runtime.
+    pub fn new_test_ext() -> sp_io::TestExternalities {
+        system::GenesisConfig::default().build_storage::<Test>().unwrap().into()
+    }
+
+    #[test]
+    fn owned_kitties_can_append_values() {
+        new_test_ext().execute_with(|| {
+            run_to_block(10);
+            assert_eq!(Kitties::create(Origin::signed(1),), Ok(()));
+        })
+    }
 
 }
