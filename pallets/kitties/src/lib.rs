@@ -2,13 +2,16 @@
 
 use codec::{Encode, Decode};
 use frame_support::{
-    decl_module, decl_storage, decl_event, decl_error, sp_runtime,
-    dispatch, ensure, StorageValue, StorageMap, traits::Randomness, Parameter};
+	decl_module, decl_storage, decl_event, decl_error, sp_runtime, ensure,
+	StorageValue, StorageMap, Parameter,
+	traits::{Randomness, Currency, ReservableCurrency, Get, ExistenceRequirement},
+
+};
 use sp_io::hashing::blake2_128;
 use frame_system::ensure_signed;
 use sp_runtime::DispatchError;
 use sp_std::prelude::*;
-use sp_runtime::traits::{AtLeast32Bit, Bounded, One, Zero};
+use sp_runtime::traits::{AtLeast32Bit, Bounded, One, Member, AtLeast32BitUnsigned};
 
 
 #[cfg(test)]
@@ -17,19 +20,25 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
+type BalanceOf<T> = <<T as Trait>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::Balance;
+
 pub trait Trait: frame_system::Trait {
     type Event: From<Event<Self>> + Into<<Self as frame_system::Trait>::Event>;
     //Random kitty dna
     type Randomness: Randomness<Self::Hash>;
 
-	type KittyIndex: Parameter + Default + Copy + AtLeast32Bit;
+	type KittyIndex: Member + Parameter + Default + Copy + AtLeast32Bit;
+
+	/// The currency mechanism.
+	type Currency: ReservableCurrency<Self::AccountId>;
+	type StakeForKitty: Get<BalanceOf<Self>>;
 
 }
 
 // Kitty dna data, array of u8, length 16
-// TODO: u32 might overfolow if kittyindex is changed from runtime
 #[derive(Encode, Decode)]
 pub struct Kitty(pub [u8; 16]);
+
 
 
 decl_storage! {
@@ -49,6 +58,7 @@ decl_storage! {
 		// Track kitty's sibling
 		pub ParentsChildren get(fn sibling):  map hasher(blake2_128_concat) (T::KittyIndex, T::KittyIndex) => Vec<T::KittyIndex>;
 
+
     }
 }
 
@@ -59,16 +69,22 @@ decl_error! {
 		RequireDifferentParent,
 		KittyNotExit,
 		NotKittyOwner,
+		NotEnoughBalance,
+		CantTransferToSelf
     }
 }
 
 decl_event!(
 	pub enum Event<T> where
 	AccountId = <T as frame_system::Trait>::AccountId,
-	KittyIndex = <T as Trait>::KittyIndex
+	KittyIndex = <T as Trait>::KittyIndex,
+	Balance = BalanceOf<T>
 	{
         Created(AccountId, KittyIndex),
-        Transfered(AccountId, AccountId, KittyIndex),
+		Transfered(AccountId, AccountId, KittyIndex),
+		StakeForKitty(AccountId, Balance),
+		UnstakeForKitty(AccountId, Balance),
+		StakeTransferred(AccountId, AccountId, Balance),
     }
 );
 
@@ -79,7 +95,10 @@ decl_module! {
 
         #[weight=0]
         pub fn create(origin) {
-            let sender = ensure_signed(origin)?;
+			let sender = ensure_signed(origin)?;
+
+			Self::reserve(sender.clone(), T::StakeForKitty::get());
+
             let kitty_id = Self::next_kitty_id()?;
             let dna = Self::random_value(&sender);
             let kitty = Kitty(dna);
@@ -92,12 +111,14 @@ decl_module! {
         #[weight=0]
         pub fn transfer(origin, to: T::AccountId, kitty_id: T::KittyIndex) {
 			let sender = ensure_signed(origin)?;
+			Self::transferStake(sender.clone(), to.clone(), T::StakeForKitty::get());
 
 			// Have to check if the sender own the kitty
 			let kitty_owner = <KittyOwners<T>>::get(kitty_id)
 								.ok_or(Error::<T>::KittyNotExit)
 								.unwrap();
 			ensure!(sender == kitty_owner, Error::<T>::NotKittyOwner);
+			ensure!(sender != to, Error::<T>::CantTransferToSelf);
 
 			<KittyOwners<T>>::insert(kitty_id, to.clone());
 
@@ -112,7 +133,8 @@ decl_module! {
 
         #[weight=0]
         pub fn breed(origin, kitty_id_1: T::KittyIndex, kitty_id_2: T::KittyIndex) {
-            let sender = ensure_signed(origin)?;
+			let sender = ensure_signed(origin)?;
+			Self::reserve(sender.clone(), T::StakeForKitty::get());
             let new_kitty_id = Self::do_breed(&sender, kitty_id_1, kitty_id_2)?;
             Self::deposit_event(RawEvent::Created(sender, new_kitty_id));
         }
@@ -213,8 +235,6 @@ impl <T:Trait> Module<T> {
         payload.using_encoded(blake2_128)
     }
 
-
-
     fn do_breed(sender: &T::AccountId, kitty_id_1: T::KittyIndex, kitty_id_2: T::KittyIndex) -> sp_std::result::Result<T::KittyIndex, DispatchError>
     {
         let kitty1 = Self::kitties(kitty_id_1).ok_or(Error::<T>::InvalidKittyId)?;
@@ -234,11 +254,30 @@ impl <T:Trait> Module<T> {
         }
 		Self::insert_kitty(sender, kitty_id, Kitty(new_dna));
 
-		// Add parent -> children
+		// Add kitty relationship
 		Self::add_kitty_to_family_tree(kitty_id_1, kitty_id_2, kitty_id);
 
 
         Ok(kitty_id)
 
-    }
+	}
+
+	fn reserve(account: T::AccountId, amount: BalanceOf<T>) {
+		// Reserve
+		// ensure!(T::Currency::can_reserve(&account, T::StakeForKitty::get()) == true, Error::<T>::NotEnoughBalance);
+		T::Currency::reserve(&account, amount);
+
+		Self::deposit_event(RawEvent::StakeForKitty(account, amount));
+
+	}
+	fn unreserve(account: T::AccountId, amount: BalanceOf<T>) {
+		T::Currency::unreserve(&account, amount);
+		Self::deposit_event(RawEvent::UnstakeForKitty(account, amount));
+	}
+	fn transferStake(from: T::AccountId, to: T::AccountId, amount: BalanceOf<T>) {
+		T::Currency::unreserve(&from, amount);
+		T::Currency::transfer(&from, &to, amount, ExistenceRequirement::KeepAlive);
+		T::Currency::reserve(&to, amount);
+		Self::deposit_event(RawEvent::StakeTransferred(from, to, amount));
+	}
 }
