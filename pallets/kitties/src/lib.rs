@@ -107,7 +107,7 @@ decl_module! {
 
 			Self::add_kitty_to_owner(&to, kitty_id);
 
-            Self::deposit_event(RawEvent::Transfered(sender, to, kitty_id));
+			Self::deposit_event(RawEvent::Transfered(sender, to, kitty_id));
         }
 
         #[weight=0]

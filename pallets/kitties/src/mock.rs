@@ -1,14 +1,27 @@
 use crate::{Module, Trait};
 use sp_core::H256;
-use frame_support::{impl_outer_origin, parameter_types, weights::Weight, traits::{OnInitialize, OnFinalize}};
+use frame_support::{impl_outer_origin, impl_outer_event, parameter_types, weights::Weight, traits::{OnInitialize, OnFinalize}};
 use sp_runtime::{
 	traits::{BlakeTwo256, IdentityLookup}, testing::Header, Perbill,
 };
 use frame_system as system;
 
+
 impl_outer_origin! {
 	pub enum Origin for Test {}
 }
+mod kitty_event {
+    pub use crate::Event;
+}
+
+impl_outer_event! {
+	pub enum TestEvent for Test {
+		system<T>,
+		kitty_event<T>,
+	}
+}
+
+
 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Test;
@@ -19,6 +32,9 @@ parameter_types! {
 	pub const AvailableBlockRatio: Perbill = Perbill::from_percent(75);
 
 }
+
+
+
 
 impl system::Trait for Test {
 	type BaseCallFilter = ();
@@ -31,7 +47,7 @@ impl system::Trait for Test {
 	type AccountId = u64;
 	type Lookup = IdentityLookup<Self::AccountId>;
 	type Header = Header;
-	type Event = ();
+	type Event = TestEvent;
 	type BlockHashCount = BlockHashCount;
 	type MaximumBlockWeight = MaximumBlockWeight;
 	type DbWeight = ();
@@ -48,12 +64,14 @@ impl system::Trait for Test {
 	type SystemWeightInfo = ();
 }
 
+
 type Randomness = pallet_randomness_collective_flip::Module<Test>;
 impl Trait for Test {
-	type Event = ();
+	type Event = TestEvent;
 	type Randomness = Randomness;
 	type KittyIndex = u32;
 }
+
 
 pub type Kitties = Module<Test>;
 pub type System = frame_system::Module<Test>;
