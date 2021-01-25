@@ -1,7 +1,6 @@
 #![cfg_attr(not(feature="std"), no_std)]
 
 use codec::{Encode, Decode};
-// use dispatch::DispatchError;
 use frame_support::{
     decl_module, decl_storage, decl_event, decl_error, sp_runtime,
     dispatch, ensure, StorageValue, StorageMap, traits::Randomness, Parameter};
@@ -9,29 +8,46 @@ use sp_io::hashing::blake2_128;
 use frame_system::ensure_signed;
 use sp_runtime::DispatchError;
 use sp_std::prelude::*;
-use sp_runtime::traits::{Member, AtLeast32Bit, Bounded, One};
+use sp_runtime::traits::{AtLeast32Bit, Bounded, One, Zero};
 
 
-// Kitty dna data, array of u8, length 16
-#[derive(Encode, Decode)]
-pub struct Kitty(pub [u8; 16]);
+#[cfg(test)]
+mod mock;
+
+#[cfg(test)]
+mod tests;
 
 pub trait Trait: frame_system::Trait {
     type Event: From<Event<Self>> + Into<<Self as frame_system::Trait>::Event>;
     //Random kitty dna
     type Randomness: Randomness<Self::Hash>;
 
-	// type KittyIndex: Parameter + Member + Default;
 	type KittyIndex: Parameter + Default + Copy + AtLeast32Bit;
+
 }
 
+// Kitty dna data, array of u8, length 16
+// TODO: u32 might overfolow if kittyindex is changed from runtime
+#[derive(Encode, Decode)]
+pub struct Kitty(pub [u8; 16]);
+
+
 decl_storage! {
+
 	trait Store for Module<T: Trait> as Kitties {
-        pub Kitties get(fn kitties): map hasher(blake2_128_concat) <T as Trait>::KittyIndex => Option<Kitty>;
+        pub Kitties get(fn kitties): map hasher(blake2_128_concat) T::KittyIndex => Option<Kitty>;
         // Get number of kitties created
-        pub KittiesCount get(fn kitties_count): <T as Trait>::KittyIndex;
-        pub KittyOwners get(fn kitty_owner): map hasher(blake2_128_concat) <T as Trait>::KittyIndex => Option<T::AccountId>;
-        // pub KittyOwners2 get(fn kitty_owner2): map hasher(blake2_128_concat) <T as Trait>::AccountId => Vec<T::AccountId>;
+        pub KittiesCount get(fn kitties_count): T::KittyIndex;
+        pub KittyOwners get(fn kitty_owner): map hasher(blake2_128_concat) T::KittyIndex => Option<T::AccountId>;
+		// Get all kitties belong to an account
+		pub AccountKitties get(fn account_kitty): map hasher(blake2_128_concat) T::AccountId => Vec<T::KittyIndex>;
+
+		// Track kitty's children and partner
+		pub FamilyMap get(fn family_map):  double_map hasher(blake2_128_concat) T::KittyIndex, hasher(blake2_128_concat) &'static str  => Vec<T::KittyIndex>;
+		// Track kitty and parents
+		pub KittyParents get(fn kitty_parents):  map hasher(blake2_128_concat) T::KittyIndex => (T::KittyIndex, T::KittyIndex);
+		// Track kitty's sibling
+		pub ParentsChildren get(fn sibling):  map hasher(blake2_128_concat) (T::KittyIndex, T::KittyIndex) => Vec<T::KittyIndex>;
 
     }
 }
@@ -40,15 +56,16 @@ decl_error! {
     pub enum Error for Module<T:Trait> {
         KittiesCountOverflow,
         InvalidKittyId,
-        RequireDifferentParent
+		RequireDifferentParent,
+		KittyNotExit,
+		NotKittyOwner,
     }
 }
 
 decl_event!(
 	pub enum Event<T> where
 	AccountId = <T as frame_system::Trait>::AccountId,
-	// KittyIndex = <T as Trait>::KittyIndex
-	<T as Trait>::KittyIndex
+	KittyIndex = <T as Trait>::KittyIndex
 	{
         Created(AccountId, KittyIndex),
         Transfered(AccountId, AccountId, KittyIndex),
@@ -74,8 +91,22 @@ decl_module! {
 
         #[weight=0]
         pub fn transfer(origin, to: T::AccountId, kitty_id: T::KittyIndex) {
-            let sender = ensure_signed(origin)?;
-            <KittyOwners<T>>::insert(kitty_id, to.clone());
+			let sender = ensure_signed(origin)?;
+
+			// Have to check if the sender own the kitty
+			let kitty_owner = <KittyOwners<T>>::get(kitty_id)
+								.ok_or(Error::<T>::KittyNotExit)
+								.unwrap();
+			ensure!(sender == kitty_owner, Error::<T>::NotKittyOwner);
+
+			<KittyOwners<T>>::insert(kitty_id, to.clone());
+
+			// Update owner
+			AccountKitties::<T>::mutate(&sender, |val| val.retain(|&x| x != kitty_id));
+
+
+			Self::add_kitty_to_owner(&to, kitty_id);
+
             Self::deposit_event(RawEvent::Transfered(sender, to, kitty_id));
         }
 
@@ -99,17 +130,78 @@ impl <T:Trait> Module<T> {
     fn insert_kitty(owner: &T::AccountId, kitty_id: T::KittyIndex, kitty: Kitty) {
         Kitties::<T>::insert(kitty_id, kitty);
         KittiesCount::<T>::put(kitty_id + One::one());
-        <KittyOwners<T>>::insert(kitty_id, owner);
+		<KittyOwners<T>>::insert(kitty_id, owner);
 
+		Self::add_kitty_to_owner(&owner, kitty_id);
     }
 
     fn next_kitty_id() -> sp_std::result::Result<T::KittyIndex, DispatchError> {
-        let kitty_id = Self::kitties_count();
+		let  kitty_id = Self::kitties_count();
+
         if kitty_id == T::KittyIndex::max_value() {
             return Err(Error::<T>::KittiesCountOverflow.into());
         }
         Ok(kitty_id)
     }
+
+	fn add_kitty_to_owner(owner: &T::AccountId, kitty_id: T::KittyIndex,) {
+		match AccountKitties::<T>::contains_key(&owner) {
+			true => {
+				AccountKitties::<T>::append(owner, kitty_id)
+			},
+			false => {
+				AccountKitties::<T>::insert(owner, vec![kitty_id])
+			}
+		}
+	}
+
+	fn add_kitty_to_family_tree(parent_1: T::KittyIndex, parent_2: T::KittyIndex, child:T::KittyIndex) {
+
+
+		for (idx, p) in [parent_1, parent_2].iter().enumerate() {
+			// Parent add child
+
+			match FamilyMap::<T>::contains_key(p, "Children") {
+				true => {
+					FamilyMap::<T>::mutate(p, "Children",  |children| children.push(child));
+
+				},
+				false => {
+					FamilyMap::<T>::insert(p, "Children", vec![child]);
+				}
+			}
+			// Parent add partner
+			let mut p2 = parent_2;
+			if idx == 1 {
+				p2 = parent_1;
+			}
+			match FamilyMap::<T>::contains_key(p, "Partner") {
+				true => {
+					FamilyMap::<T>::mutate(p, "Partner",  |partner| if !partner.contains(&p2){partner.push(p2)});
+
+				},
+				false => {
+					FamilyMap::<T>::insert(p, "Partner", vec![p2]);
+				}
+			}
+		}
+
+		// Add kitty -> parents map
+		let mut parents_tuple = (parent_1, parent_2);
+		if parent_1 > parent_2 {
+			parents_tuple = (parent_2, parent_1);
+		}
+		<KittyParents<T>>::insert(child, parents_tuple.clone());
+
+		// Add parents -> children map
+		if <ParentsChildren<T>>::contains_key(parents_tuple) {
+			<ParentsChildren<T>>::mutate(parents_tuple, |children| children.push(child));
+        } else {
+            <ParentsChildren<T>>::insert(parents_tuple, vec![child]);
+        }
+
+	}
+
 
     fn random_value(sender: &T::AccountId) -> [u8; 16] {
         let payload = (
@@ -140,99 +232,13 @@ impl <T:Trait> Module<T> {
         for i in 0..kitty1_dna.len() {
             new_dna[i] = combine_dna(kitty1_dna[i], kitty2_dna[i], selector[i]);
         }
-        Self::insert_kitty(sender, kitty_id, Kitty(new_dna));
+		Self::insert_kitty(sender, kitty_id, Kitty(new_dna));
+
+		// Add parent -> children
+		Self::add_kitty_to_family_tree(kitty_id_1, kitty_id_2, kitty_id);
+
+
         Ok(kitty_id)
 
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use sp_core::H256;
-    use frame_support::{impl_outer_origin, parameter_types, weights::Weight,
-        traits::{OnFinalize, OnInitialize}
-    };
-    use sp_runtime::{
-        traits::{BlakeTwo256, IdentityLookup}, testing::Header, Perbill
-    };
-    use frame_system as system;
-
-    // Mock check signature
-    impl_outer_origin! {
-        pub enum Origin for Test {}
-    }
-
-    #[derive(Clone, Eq, PartialEq, Debug)]
-
-    pub struct Test;
-    parameter_types! {
-        pub const BlockHashCount: u64 = 250;
-        pub const MaximumBlockWeight: Weight = 1024;
-        pub const MaximumBlockLength: u32 = 2 * 1024;
-        pub const AvailableBlockRatio: Perbill = Perbill::from_percent(75);
-
-    }
-
-    impl system::Trait for Test {
-        type BaseCallFilter = ();
-        type Origin = Origin;
-        type Call = ();
-        type Index = u64;
-        type BlockNumber = u64;
-        type Hash = H256;
-        type Hashing = BlakeTwo256;
-        type AccountId = u64;
-        type Lookup = IdentityLookup<Self::AccountId>;
-        type Header = Header;
-        type Event = ();
-        type BlockHashCount = BlockHashCount;
-        type MaximumBlockWeight = MaximumBlockWeight;
-        type DbWeight = ();
-        type BlockExecutionWeight = ();
-        type ExtrinsicBaseWeight = ();
-        type MaximumExtrinsicWeight = MaximumBlockWeight;
-        type MaximumBlockLength = MaximumBlockLength;
-        type AvailableBlockRatio = AvailableBlockRatio;
-        type Version = ();
-        type PalletInfo = ();
-        type AccountData = ();
-        type OnNewAccount = ();
-        type OnKilledAccount = ();
-        type SystemWeightInfo = ();
-    }
-
-    type Randomness = pallet_randomness_collective_flip::Module<Test>;
-
-    impl Trait for Test {
-        type Event = ();
-        type Randomness = Randomness;
-    }
-
-    pub type Kitties = Module<Test>;
-    pub type System = frame_system::Module<Test>;
-
-    fn run_to_block(n: u64) {
-        while System::block_number() < n {
-            Kitties::on_finalize(System::block_number());
-            System::on_finalize(System::block_number());
-            System::set_block_number(System::block_number()+1);
-            System::on_initialize(System::block_number());
-            Kitties::on_initialize(System::block_number());
-        }
-    }
-
-    // Build genesis storage according to the mock runtime.
-    pub fn new_test_ext() -> sp_io::TestExternalities {
-        system::GenesisConfig::default().build_storage::<Test>().unwrap().into()
-    }
-
-    #[test]
-    fn owned_kitties_can_append_values() {
-        new_test_ext().execute_with(|| {
-            run_to_block(10);
-            assert_eq!(Kitties::create(Origin::signed(1),), Ok(()));
-        })
-    }
-
 }
