@@ -84,7 +84,7 @@ decl_event!(
 		Transfered(AccountId, AccountId, KittyIndex),
 		StakeForKitty(AccountId, Balance),
 		UnstakeForKitty(AccountId, Balance),
-		StakeTransferred(AccountId, AccountId, Balance),
+		// StakeTransferred(AccountId, AccountId, Balance),
     }
 );
 
@@ -111,7 +111,7 @@ decl_module! {
         #[weight=0]
         pub fn transfer(origin, to: T::AccountId, kitty_id: T::KittyIndex) {
 			let sender = ensure_signed(origin)?;
-			Self::transferStake(sender.clone(), to.clone(), T::StakeForKitty::get());
+			Self::transfer_stake(sender.clone(), to.clone(), T::StakeForKitty::get());
 
 			// Have to check if the sender own the kitty
 			let kitty_owner = <KittyOwners<T>>::get(kitty_id)
@@ -265,19 +265,16 @@ impl <T:Trait> Module<T> {
 	fn reserve(account: T::AccountId, amount: BalanceOf<T>) {
 		// Reserve
 		// ensure!(T::Currency::can_reserve(&account, T::StakeForKitty::get()) == true, Error::<T>::NotEnoughBalance);
-		T::Currency::reserve(&account, amount);
+		let _ = T::Currency::reserve(&account, amount).map_err(|_| Error::<T>::NotEnoughBalance);
 
 		Self::deposit_event(RawEvent::StakeForKitty(account, amount));
 
 	}
-	fn unreserve(account: T::AccountId, amount: BalanceOf<T>) {
-		T::Currency::unreserve(&account, amount);
-		Self::deposit_event(RawEvent::UnstakeForKitty(account, amount));
-	}
-	fn transferStake(from: T::AccountId, to: T::AccountId, amount: BalanceOf<T>) {
+
+	fn transfer_stake(from: T::AccountId, to: T::AccountId, amount: BalanceOf<T>) {
 		T::Currency::unreserve(&from, amount);
-		T::Currency::transfer(&from, &to, amount, ExistenceRequirement::KeepAlive);
-		T::Currency::reserve(&to, amount);
-		Self::deposit_event(RawEvent::StakeTransferred(from, to, amount));
+		let _ = T::Currency::transfer(&from, &to, amount, ExistenceRequirement::KeepAlive);
+		let _ =  T::Currency::reserve(&to, amount);
+		// Self::deposit_event(RawEvent::StakeTransferred(from, to, amount));
 	}
 }
