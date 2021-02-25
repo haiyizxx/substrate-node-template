@@ -3,7 +3,7 @@
 use codec::{Encode, Decode};
 use frame_support::{
 	decl_module, decl_storage, decl_event, decl_error, sp_runtime, ensure,
-	StorageValue, StorageMap, Parameter,
+	StorageValue, StorageMap, Parameter, weights::Weight,
 	traits::{Randomness, Currency, ReservableCurrency, Get, ExistenceRequirement},
 
 };
@@ -58,7 +58,8 @@ decl_storage! {
 		// Track kitty's sibling
 		pub ParentsChildren get(fn sibling):  map hasher(blake2_128_concat) (T::KittyIndex, T::KittyIndex) => Vec<T::KittyIndex>;
 
-
+		pub Test: u32;
+		pub KittyPrices get(fn kitty_price): map hasher(blake2_128_concat) T::KittyIndex => Option<BalanceOf<T>>;
     }
 }
 
@@ -70,7 +71,9 @@ decl_error! {
 		KittyNotExit,
 		NotKittyOwner,
 		NotEnoughBalance,
-		CantTransferToSelf
+		CantTransferToSelf,
+		NotForSale,
+		PriceTooLow
     }
 }
 
@@ -137,7 +140,31 @@ decl_module! {
 			Self::reserve(sender.clone(), T::StakeForKitty::get());
             let new_kitty_id = Self::do_breed(&sender, kitty_id_1, kitty_id_2)?;
             Self::deposit_event(RawEvent::Created(sender, new_kitty_id));
-        }
+		}
+
+		fn on_runtime_upgrade() -> Weight {
+			// Map from old u16 to u32
+			let _ = Test::translate::<_, _>(|value: Option<u16>| value.map(|v| v as u32));
+			0
+		}
+
+		#[weight = 0]
+		pub fn ask(orign, kitty_id: T::KittyIndex, new_price: Option<BalanceOf<T>>) {
+			let sender = ensure_signed(orign)?;
+			ensure!(Self::kitty_owner(&kitty_id) == Some(sender.clone()), Error::<T>::NotKittyOwner);
+			<KittyPrices<T>>::mutate_exists(kitty_id, |price| *price = new_price);
+		}
+
+		#[weight = 0]
+		pub fn buy(orign, kitty_id: T::KittyIndex, price: Option<BalanceOf<T>>) {
+			let sender = ensure_signed(orign)?;
+			let owner = Self::kitty_owner(kitty_id).ok_or(Error::<T>::InvalidKittyId)?;
+			let kitty_price = Self::kitty_price(kitty_id).ok_or(Error::<T>::NotForSale)?;
+			ensure!(price.unwrap() >= kitty_price, Error::<T>::PriceTooLow);
+			T::Currency::transfer(&sender, &owner, kitty_price, ExistenceRequirement::KeepAlive)?;
+			<KittyPrices<T>>::remove(kitty_id);
+			<KittyOwners<T>>::insert(kitty_id, sender.clone());
+		}
     }
 }
 
